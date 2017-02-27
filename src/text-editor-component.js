@@ -26,9 +26,9 @@ class TextEditorComponent {
     this.measurements = null
     this.visible = false
     this.horizontalPositionsToMeasure = new Map() // Keys are rows with positions we want to measure, values are arrays of columns to measure
-    this.horizontalPixelPositionsByScreenLine = new WeakMap() // Values are maps from column to horiontal pixel positions
-    this.lineNodesByScreenLine = new WeakMap()
-    this.textNodesByScreenLine = new WeakMap()
+    this.horizontalPixelPositionsByScreenLineId = new Map() // Values are maps from column to horiontal pixel positions
+    this.lineNodesByScreenLineId = new Map()
+    this.textNodesByScreenLineId = new Map()
     this.cursorsToRender = []
 
     if (this.props.model) this.observeModel()
@@ -87,8 +87,18 @@ class TextEditorComponent {
       style = {contain: 'strict'}
     }
 
-    return $('atom-text-editor', {style},
-      $.div({ref: 'scroller', onScroll: this.didScroll, className: 'scroll-view'},
+    let className = 'editor'
+    if (this.focused) {
+      className += ' is-focused'
+    }
+
+    return $('atom-text-editor', {
+        className,
+        style,
+        tabIndex: -1,
+        on: {focus: this.didFocusRootElement}
+      },
+      $.div({ref: 'scroller', on: {scroll: this.didScroll}, className: 'scroll-view'},
         $.div({
           style: {
             isolate: 'content',
@@ -212,7 +222,7 @@ class TextEditorComponent {
       style.width = width
       style.height = height
       children = [
-        this.renderCursors(width, height),
+        this.renderCursorsAndInput(width, height),
         this.renderLineTiles(width, height)
       ]
     } else {
@@ -230,7 +240,7 @@ class TextEditorComponent {
   renderLineTiles (width, height) {
     if (!this.measurements) return []
 
-    const {lineNodesByScreenLine, textNodesByScreenLine} = this
+    const {lineNodesByScreenLineId, textNodesByScreenLineId} = this
 
     const firstTileStartRow = this.getFirstTileStartRow()
     const visibleTileCount = this.getVisibleTileCount()
@@ -250,8 +260,8 @@ class TextEditorComponent {
           key: screenLine.id,
           screenLine,
           displayLayer,
-          lineNodesByScreenLine,
-          textNodesByScreenLine
+          lineNodesByScreenLineId,
+          textNodesByScreenLineId
         }))
         if (screenLine === this.longestLineToMeasure) {
           this.longestLineToMeasure = null
@@ -280,8 +290,8 @@ class TextEditorComponent {
         key: this.longestLineToMeasure.id,
         screenLine: this.longestLineToMeasure,
         displayLayer,
-        lineNodesByScreenLine,
-        textNodesByScreenLine
+        lineNodesByScreenLineId,
+        textNodesByScreenLineId
       }))
       this.longestLineToMeasure = null
     }
@@ -297,8 +307,22 @@ class TextEditorComponent {
     }, tileNodes)
   }
 
-  renderCursors (width, height) {
+  renderCursorsAndInput (width, height) {
     const cursorHeight = this.measurements.lineHeight + 'px'
+
+    const children = [this.renderInput()]
+
+    for (let i = 0; i < this.cursorsToRender.length; i++) {
+      const {pixelLeft, pixelTop, pixelWidth} = this.cursorsToRender[i]
+      children.push($.div({
+        className: 'cursor',
+        style: {
+          height: cursorHeight,
+          width: pixelWidth + 'px',
+          transform: `translate(${pixelLeft}px, ${pixelTop}px)`
+        }
+      }))
+    }
 
     return $.div({
       key: 'cursors',
@@ -308,18 +332,41 @@ class TextEditorComponent {
         contain: 'strict',
         width, height
       }
-    },
-      this.cursorsToRender.map(({pixelLeft, pixelTop, pixelWidth}) =>
-        $.div({
-          className: 'cursor',
-          style: {
-            height: cursorHeight,
-            width: pixelWidth + 'px',
-            transform: `translate(${pixelLeft}px, ${pixelTop}px)`
-          }
-        })
-      )
-    )
+    }, children)
+  }
+
+  renderInput () {
+    let top, left
+
+    if (this.focused && this.inputScreenPosition) {
+      const {row, column} = this.inputScreenPosition
+      const maxTop = this.measurements.scrollTop + this.measurements.scrollerHeight - this.measurements.lineHeight
+      const maxLeft = this.measurements.scrollLeft + this.measurements.scrollerWidth
+      top = Math.max(this.measurements.scrollTop, Math.min(maxTop, this.pixelTopForScreenRow(row)))
+      left = Math.max(this.measurements.scrollLeft, Math.min(maxLeft, this.pixelLeftForScreenRowAndColumn(row, column)))
+    } else {
+      top = this.measurements.scrollTop
+      left = this.measurements.scrollLeft
+    }
+    return $.input({
+      ref: 'hiddenInput',
+      className: 'hidden-input',
+      on: {
+        focus: this.didFocusHiddenInput,
+        blur: this.didBlurHiddenInput
+      },
+      tabIndex: -1,
+      style: {
+        position: 'absolute',
+        width: '1px',
+        height: this.measurements.lineHeight + 'px',
+        top: top + 'px',
+        left: left + 'px',
+        opacity: 0,
+        padding: 0,
+        border: 0
+      }
+    })
   }
 
   queryCursorsToRender () {
@@ -330,10 +377,13 @@ class TextEditorComponent {
         this.getRenderedEndRow() - 1,
       ]
     })
+    const lastCursorMarker = model.getLastCursor().getMarker()
 
     this.cursorsToRender.length = cursorMarkers.length
+    this.inputScreenPosition = null
     for (let i = 0; i < cursorMarkers.length; i++) {
-      const screenPosition = cursorMarkers[i].getHeadScreenPosition()
+      const cursorMarker = cursorMarkers[i]
+      const screenPosition = cursorMarker.getHeadScreenPosition()
       const {row, column} = screenPosition
       this.requestHorizontalMeasurement(row, column)
       let columnWidth = 0
@@ -344,6 +394,10 @@ class TextEditorComponent {
       this.cursorsToRender[i] = {
         screenPosition, columnWidth,
         pixelTop: 0, pixelLeft: 0, pixelWidth: 0
+      }
+
+      if (cursorMarker === lastCursorMarker) {
+        this.inputScreenPosition = screenPosition
       }
     }
   }
@@ -396,6 +450,26 @@ class TextEditorComponent {
     }
   }
 
+  didFocusRootElement () {
+    this.refs.hiddenInput.focus()
+  }
+
+  didFocusHiddenInput () {
+    if (!this.focused) {
+      this.focused = true
+      this.scheduleUpdate()
+    }
+  }
+
+  didBlurHiddenInput (event) {
+    if (event.relatedTarget !== this.element) {
+      this.focused = false
+      this.scheduleUpdate()
+    }
+  }
+
+  containsFocusedElement () {}
+
   didScroll () {
     this.measureScrollPosition()
     this.updateSync()
@@ -417,13 +491,18 @@ class TextEditorComponent {
   }
 
   measureEditorDimensions () {
+    let dimensionsChanged = false
     const scrollerHeight = this.refs.scroller.offsetHeight
+    const scrollerWidth = this.refs.scroller.offsetWidth
     if (scrollerHeight !== this.measurements.scrollerHeight) {
-      this.measurements.scrollerHeight = this.refs.scroller.offsetHeight
-      return true
-    } else {
-      return false
+      this.measurements.scrollerHeight = scrollerHeight
+      dimensionsChanged = true
     }
+    if (scrollerWidth !== this.measurements.scrollerWidth) {
+      this.measurements.scrollerWidth = scrollerWidth
+      dimensionsChanged = true
+    }
+    return dimensionsChanged
   }
 
   measureScrollPosition () {
@@ -440,7 +519,7 @@ class TextEditorComponent {
   }
 
   measureLongestLineWidth (screenLine) {
-    this.measurements.scrollWidth = this.lineNodesByScreenLine.get(screenLine).firstChild.offsetWidth
+    this.measurements.scrollWidth = this.lineNodesByScreenLineId.get(screenLine.id).firstChild.offsetWidth
   }
 
   measureGutterDimensions () {
@@ -461,12 +540,12 @@ class TextEditorComponent {
       columnsToMeasure.sort((a, b) => a - b)
 
       const screenLine = this.getModel().displayLayer.getScreenLine(row)
-      const lineNode = this.lineNodesByScreenLine.get(screenLine)
-      const textNodes = this.textNodesByScreenLine.get(screenLine)
-      let positionsForLine = this.horizontalPixelPositionsByScreenLine.get(screenLine)
+      const lineNode = this.lineNodesByScreenLineId.get(screenLine.id)
+      const textNodes = this.textNodesByScreenLineId.get(screenLine.id)
+      let positionsForLine = this.horizontalPixelPositionsByScreenLineId.get(screenLine.id)
       if (positionsForLine == null) {
         positionsForLine = new Map()
-        this.horizontalPixelPositionsByScreenLine.set(screenLine, positionsForLine)
+        this.horizontalPixelPositionsByScreenLineId.set(screenLine.id, positionsForLine)
       }
 
       this.measureHorizontalPositionsOnLine(lineNode, textNodes, columnsToMeasure, positionsForLine)
@@ -477,6 +556,8 @@ class TextEditorComponent {
     let lineNodeClientLeft = -1
     let textNodeStartColumn = 0
     let textNodesIndex = 0
+
+    if (!textNodes) debugger
 
     columnLoop:
     for (let columnsIndex = 0; columnsIndex < columnsToMeasure.length; columnsIndex++) {
@@ -519,8 +600,11 @@ class TextEditorComponent {
   }
 
   pixelLeftForScreenRowAndColumn (row, column) {
+    if (column === 0) return 0
     const screenLine = this.getModel().displayLayer.getScreenLine(row)
-    return this.horizontalPixelPositionsByScreenLine.get(screenLine).get(column)
+
+    if (!this.horizontalPixelPositionsByScreenLineId.has(screenLine.id)) debugger
+    return this.horizontalPixelPositionsByScreenLineId.get(screenLine.id).get(column)
   }
 
   getModel () {
@@ -622,13 +706,15 @@ class TextEditorComponent {
 }
 
 class LineComponent {
-  constructor ({displayLayer, screenLine, lineNodesByScreenLine, textNodesByScreenLine}) {
+  constructor (props) {
+    const {displayLayer, screenLine, lineNodesByScreenLineId, textNodesByScreenLineId} = props
+    this.props = props
     this.element = document.createElement('div')
     this.element.classList.add('line')
-    lineNodesByScreenLine.set(screenLine, this.element)
+    lineNodesByScreenLineId.set(screenLine.id, this.element)
 
     const textNodes = []
-    textNodesByScreenLine.set(screenLine, textNodes)
+    textNodesByScreenLineId.set(screenLine.id, textNodes)
 
     const {lineText, tagCodes} = screenLine
     let startIndex = 0
@@ -671,6 +757,11 @@ class LineComponent {
   }
 
   update () {}
+
+  destroy () {
+    this.props.lineNodesByScreenLineId.delete(this.props.screenLine.id)
+    this.props.textNodesByScreenLineId.delete(this.props.screenLine.id)
+  }
 }
 
 const classNamesByScopeName = new Map()

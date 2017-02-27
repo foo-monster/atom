@@ -180,10 +180,10 @@ function clientLeftForCharacter (component, row, column) {
 
 function lineNodeForScreenRow (component, row) {
   const screenLine = component.getModel().screenLineForScreenRow(row)
-  return component.lineNodesByScreenLine.get(screenLine)
+  return component.lineNodesByScreenLineId.get(screenLine.id)
 }
 
 function textNodesForScreenRow (component, row) {
   const screenLine = component.getModel().screenLineForScreenRow(row)
-  return component.textNodesByScreenLine.get(screenLine)
+  return component.textNodesByScreenLineId.get(screenLine.id)
 }
